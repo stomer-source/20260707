@@ -3,6 +3,16 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- Google tag (gtag.js) -->
+    <script async src="https://www.googletagmanager.com/gtag/js?id=G-FXMTHN5RPY"></script>
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      function gtag() {
+        dataLayer.push(arguments);
+      }
+      gtag("js", new Date());
+      gtag("config", "G-FXMTHN5RPY");
+    </script>
     <title>로또 추첨기 | DESIGN.md 반영</title>
     <style>
       :root {
@@ -1029,7 +1039,8 @@
       </main>
     </div>
 
-    <script>
+    <script type="module">
+      import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js/+esm";
       const drawButton = document.getElementById("drawButton");
       const resetButton = document.getElementById("resetButton");
       const drawnStack = document.getElementById("drawnStack");
@@ -1042,6 +1053,9 @@
       const confetti = document.getElementById("confetti");
 
       const historyLimit = 5;
+      const SUPABASE_URL = "https://nrewgctxflwxyzyjjcpu.supabase.co";
+      const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5yZXdnY3R4Zmx3eHl6eWpqY3B1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODM0NTM1NDYsImV4cCI6MjA5OTAyOTU0Nn0.w7OUXHcXPJX9fHrA-T7vrTAj5CIo4NJCwWXamQDK_h8";
+      const SUPABASE_TABLE = "lotto_draws";
       const officialStatsData = {
         most: [34, 27, 13, 12, 18, 45],
         least: [9, 22, 32, 23, 41, 25],
@@ -1056,6 +1070,8 @@
       ];
 
       const floatingSet = [3, 7, 12, 18, 24, 31, 37, 42];
+      const hasSupabaseConfig = Boolean(SUPABASE_URL && SUPABASE_ANON_KEY);
+      const supabase = hasSupabaseConfig ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
 
       let historyData = [];
       let drawBusy = false;
@@ -1104,6 +1120,50 @@
           minute: "2-digit",
           second: "2-digit",
         }).format(date);
+      }
+
+      function normalizeDrawRow(row) {
+        return {
+          main: Array.isArray(row.main_numbers) ? row.main_numbers : [],
+          bonus: row.bonus_number,
+          drawnAt: new Date(row.drawn_at ?? row.created_at ?? Date.now()),
+        };
+      }
+
+      async function loadHistoryFromDb() {
+        if (!supabase) {
+          return [];
+        }
+
+        const { data, error } = await supabase
+          .from(SUPABASE_TABLE)
+          .select("main_numbers, bonus_number, drawn_at, created_at")
+          .order("drawn_at", { ascending: false })
+          .limit(historyLimit);
+
+        if (error) {
+          throw error;
+        }
+
+        return (data ?? []).map(normalizeDrawRow);
+      }
+
+      async function saveDrawToDb(result) {
+        if (!supabase) {
+          return;
+        }
+
+        const { error } = await supabase.from(SUPABASE_TABLE).insert([
+          {
+            main_numbers: result.main,
+            bonus_number: result.bonus,
+            drawn_at: result.drawnAt.toISOString(),
+          },
+        ]);
+
+        if (error) {
+          throw error;
+        }
       }
 
       function renderCurrent(result) {
@@ -1209,6 +1269,7 @@
         const result = drawLotto();
         drawnStack.innerHTML = "";
         terminalOutput.textContent = "> lotto draw\nshuffling...";
+        const savePromise = saveDrawToDb(result);
 
         setStatus(delaySteps[0]);
 
@@ -1231,17 +1292,23 @@
           setStatus(`보너스 번호 ${result.bonus}번까지 확정되었습니다.`);
         }, 180 + result.main.length * 220);
 
-        window.setTimeout(() => {
+        window.setTimeout(async () => {
           historyData = [result, ...historyData].slice(0, historyLimit);
           renderHistory();
           createConfetti();
           renderTerminal(result);
-          setStatus(
-            `완료! ${result.main.join(", ")} / 보너스 ${result.bonus}번`
-          );
-          drawButton.disabled = false;
-          resetButton.disabled = false;
-          drawBusy = false;
+
+          try {
+            await savePromise;
+            setStatus(`완료! ${result.main.join(", ")} / 보너스 ${result.bonus}번이 Supabase에 저장되었습니다.`);
+          } catch (error) {
+            console.error(error);
+            setStatus(`완료! ${result.main.join(", ")} / 보너스 ${result.bonus}번을 표시했습니다. 저장은 실패했습니다.`);
+          } finally {
+            drawButton.disabled = false;
+            resetButton.disabled = false;
+            drawBusy = false;
+          }
         }, 180 + result.main.length * 220 + 420);
       }
 
@@ -1258,13 +1325,41 @@
         createConfetti();
       }
 
+      async function bootstrap() {
+        drawButton.disabled = true;
+        resetButton.disabled = true;
+
+        try {
+          if (supabase) {
+            setStatus("Supabase에서 최근 추첨 기록을 불러오는 중...");
+            historyData = await loadHistoryFromDb();
+            renderHistory();
+            setStatus(
+              historyData.length > 0
+                ? "Supabase에서 최근 추첨 기록을 불러왔습니다."
+                : "저장된 추첨 기록이 없습니다. 첫 추첨을 시작해 보세요."
+            );
+          } else {
+            renderHistory();
+            setStatus("Supabase URL과 anon key를 넣으면 DB에 저장됩니다.");
+          }
+        } catch (error) {
+          console.error(error);
+          renderHistory();
+          setStatus("Supabase 기록을 불러오지 못했습니다. 화면은 계속 사용할 수 있습니다.");
+        } finally {
+          drawButton.disabled = false;
+          resetButton.disabled = false;
+        }
+      }
+
       drawButton.addEventListener("click", drawOnce);
       resetButton.addEventListener("click", resetMachine);
 
       renderFloatingBalls();
-      renderHistory();
       renderStatRow(mostStats, officialStatsData.most);
       renderStatRow(leastStats, officialStatsData.least);
+      bootstrap();
     </script>
   </body>
 </html>
